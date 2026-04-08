@@ -1,5 +1,52 @@
 use postgres::{Client, Error, GenericClient, NoTls};
 
+/**
+ * jobs table holds job to be processed. it also has a status column
+ * a writer, it inserts a row with status = 'pending'
+ * a daemon, a loop that asks 'any pending jobs?' and runs them
+ * 
+ * pesudocode
+ * loop forever:
+    row = SELECT * FROM rhino_jobs 
+          WHERE status = 'pending' 
+          FOR UPDATE SKIP LOCKED
+          LIMIT 1
+
+    if no row:
+        sleep 500ms
+        continue
+
+    run(row.job_type, row.payload)
+
+    if success:
+        UPDATE status = 'done'
+    if failure:
+        UPDATE attempts = attempts + 1
+        UPDATE run_at = now + backoff
+        UPDATE status = 'pending'
+    if attempts >= max_attempts:
+        UPDATE status = 'dead'
+ */ 
+
+fn main() {
+    let mut client = match init_db() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Database initialization failed: {}", e);
+            return;
+        }
+    };
+    println!("Rhino Daemon is running...");
+    loop {
+        if let Err(e) = daemon(&mut client) {
+            eprintln!("Daemon error: {}", e);
+            break;
+        }
+    }
+    // Here you would add your job processing loop
+}
+
+
 fn daemon(client: &mut Client) -> Result<(), Error> {
     println!("Starting Rhino Daemon...");
     let pending_job = client.query(
@@ -33,20 +80,3 @@ fn init_db() -> Result<Client, Error> {
     Ok(client)
 }
 
-fn main() {
-    let mut client = match init_db() {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("Database initialization failed: {}", e);
-            return;
-        }
-    };
-    println!("Rhino Daemon is running...");
-    loop {
-        if let Err(e) = daemon(&mut client) {
-            eprintln!("Daemon error: {}", e);
-            break;
-        }
-    }
-    // Here you would add your job processing loop
-}
