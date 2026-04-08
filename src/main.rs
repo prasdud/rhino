@@ -1,4 +1,4 @@
-use postgres::{Client, Error, GenericClient, NoTls};
+use sqlx::PgPool;
 
 /**
  * jobs table holds job to be processed. it also has a status column
@@ -28,7 +28,13 @@ use postgres::{Client, Error, GenericClient, NoTls};
         UPDATE status = 'dead'
  */ 
 
-fn main() {
+// constants
+const DB_URL: &str = "postgresql://rhino:rhino@localhost:5445/rhino_db";
+
+async fn main() {
+    let pool = PgPool::connect(DB_URL)
+    .await
+    .unwrap();
     let mut client = match init_db() {
         Ok(c) => c,
         Err(e) => {

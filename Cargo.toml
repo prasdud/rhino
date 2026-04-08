@@ -5,3 +5,4 @@ edition = "2024"
 
 [dependencies]
 postgres = "0.19.13"
+sqlx = "0.8.6"
