@@ -1,26 +1,51 @@
-use postgres::{Client, NoTls, Error};
+use postgres::{Client, Error, GenericClient, NoTls};
 
-fn main() -> Result<(), Error> {
+fn daemon(client: &mut Client) -> Result<(), Error> {
+    println!("Starting Rhino Daemon...");
+    let pending_job = client.query(
+        "SELECT * FROM jobs 
+        WHERE status = 'pending' 
+        ORDER BY id 
+        LIMIT 1",
+        &[]
+    )?;
+    Ok(
+        if pending_job.is_empty() {
+            println!("No pending jobs found.");
+        } else {
+            let job = &pending_job[0];
+            println!("Processing job: {:?}", job);
+            // Here you would add your job processing logic
+        }
+    )
+}
+
+fn init_db() -> Result<Client, Error> {
     let mut client = Client::connect("postgresql://rhino:rhino@localhost:5445/rhino_db", NoTls)?;
-    
-    let res = client.batch_execute("
+    client.batch_execute("
         CREATE TABLE IF NOT EXISTS jobs (
             id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
             job_type        TEXT NOT NULL,
             status          TEXT NOT NULL DEFAULT 'pending'
         )
-    ");
-    match res {
-        Ok(_) => {
-            let mut i = 0;
-            loop {
-                i += 1;
-                println!("Waiting for jobs... {}", i);
-            }
-        },
+    ")?;
+    Ok(client)
+}
+
+fn main() {
+    let mut client = match init_db() {
+        Ok(c) => c,
         Err(e) => {
-            eprintln!("Database error: {}", e);
-            return Err(e);
+            eprintln!("Database initialization failed: {}", e);
+            return;
+        }
+    };
+    println!("Rhino Daemon is running...");
+    loop {
+        if let Err(e) = daemon(&mut client) {
+            eprintln!("Daemon error: {}", e);
+            break;
         }
     }
+    // Here you would add your job processing loop
 }
