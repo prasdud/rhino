@@ -6,7 +6,8 @@ fn daemon(client: &mut Client) -> Result<(), Error> {
         "SELECT * FROM jobs 
         WHERE status = 'pending' 
         ORDER BY id 
-        LIMIT 1",
+        LIMIT 1
+        FOR UPDATE SKIP LOCKED",
         &[]
     )?;
     Ok(
