@@ -55,6 +55,15 @@ async fn main() {
     }
 }
 
+async fn some_job(first_number: i16, second_number: i16) -> i16 {
+    if first_number < 0|| second_number < 0 {
+        return -1;
+    } else {
+        return first_number + second_number;
+    }
+
+}
+
 async fn daemon(pool: &PgPool) -> Result<(), sqlx::Error> {
     let mut tx = pool.begin().await?;
 
@@ -93,7 +102,14 @@ async fn daemon(pool: &PgPool) -> Result<(), sqlx::Error> {
     .await?;
 
     // Placeholder execution result for MVP wiring.
-    let is_task_done = true;
+    let result = some_job(10, 20).await;
+    
+    let is_task_done;
+    if result > 0 {
+        is_task_done = true;
+    } else {
+        is_task_done= false;
+    }
 
     if is_task_done {
         sqlx::query(
