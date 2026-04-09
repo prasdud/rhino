@@ -12,3 +12,6 @@ worker stuff
     - retry logic, backoff with dlq
     - sleep when no pending jobs, rn hammers postgres
     - transaction integrity
+
+
+right now everything in main.rs till POC, then modularize and at least one layer of abstraction, DRY etcetc

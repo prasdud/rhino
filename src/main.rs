@@ -53,9 +53,11 @@ async fn main() {
 fn daemon(client: &mut Client) -> Result<(), Error> {
     println!("Starting Rhino Daemon...");
     let pending_job = client.query(
-        "SELECT * FROM jobs 
+        "SELECT id, job_type, payload, attempts
+        FROM jobs 
         WHERE status = 'pending' 
-        ORDER BY id 
+            AND run_at <= NOW()
+        ORDER BY priority DESC, run_at ASC
         LIMIT 1
         FOR UPDATE SKIP LOCKED",
         &[]
