@@ -32,9 +32,6 @@ use sqlx::PgPool;
 const DB_URL: &str = "postgresql://rhino:rhino@localhost:5445/rhino_db";
 
 async fn main() {
-    let pool = PgPool::connect(DB_URL)
-    .await
-    .unwrap();
     let mut client = match init_db() {
         Ok(c) => c,
         Err(e) => {
@@ -78,9 +75,15 @@ fn init_db() -> Result<Client, Error> {
     let mut client = Client::connect("postgresql://rhino:rhino@localhost:5445/rhino_db", NoTls)?;
     client.batch_execute("
         CREATE TABLE IF NOT EXISTS jobs (
-            id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-            job_type        TEXT NOT NULL,
-            status          TEXT NOT NULL DEFAULT 'pending'
+            id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+            job_type        TEXT        NOT NULL,
+            payload         JSONB       NOT NULL DEFAULT '{}',
+            status          TEXT        NOT NULL DEFAULT 'pending',
+            attempts        INT         NOT NULL DEFAULT 0,
+            max_attempts    INT         NOT NULL DEFAULT 3,
+            run_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            locked_at       TIMESTAMPTZ,
+            inserted_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
     ")?;
     Ok(client)
