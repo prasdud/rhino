@@ -59,13 +59,14 @@ async fn daemon(pool: &PgPool) -> Result<(), sqlx::Error> {
     let mut tx = pool.begin().await?;
 
     let pending_job = sqlx::query(
-        "SELECT id::text AS id, job_type, payload, attempts, max_attempts
-         FROM rhino_jobs
-         WHERE status = 'pending'
-           AND run_at <= NOW()
-         ORDER BY priority DESC, run_at ASC
-         LIMIT 1
-         FOR UPDATE SKIP LOCKED",
+        "
+        SELECT      id::text AS id, job_type, payload, attempts, max_attempts
+        FROM        rhino_jobs
+        WHERE       status = 'pending'
+        AND         run_at <= NOW()
+        ORDER BY    priority DESC, run_at ASC
+        LIMIT 1
+        FOR UPDATE SKIP LOCKED",
     )
     .fetch_optional(&mut *tx)
     .await?;
@@ -81,9 +82,10 @@ async fn daemon(pool: &PgPool) -> Result<(), sqlx::Error> {
     let max_attempts: i32 = job.get("max_attempts");
 
     sqlx::query(
-        "UPDATE rhino_jobs
-         SET status = 'locked', locked_at = NOW(), locked_by = $2
-         WHERE id::text = $1",
+        "
+        UPDATE      rhino_jobs
+        SET         status = 'locked', locked_at = NOW(), locked_by = $2
+        WHERE       id::text = $1",
     )
     .bind(&id)
     .bind("worker-1")
@@ -95,9 +97,10 @@ async fn daemon(pool: &PgPool) -> Result<(), sqlx::Error> {
 
     if is_task_done {
         sqlx::query(
-            "UPDATE rhino_jobs
-             SET status = 'done'
-             WHERE id::text = $1",
+            "
+            UPDATE      rhino_jobs
+            SET         status = 'done'
+            WHERE       id::text = $1",
         )
         .bind(&id)
         .execute(&mut *tx)
@@ -109,9 +112,10 @@ async fn daemon(pool: &PgPool) -> Result<(), sqlx::Error> {
 
         if max_attempts > 0 && next_attempt >= max_attempts {
             sqlx::query(
-                "UPDATE rhino_jobs
-                 SET status = 'dead', attempts = $2
-                 WHERE id::text = $1",
+                "
+                UPDATE      rhino_jobs
+                SET         status = 'dead', attempts = $2
+                WHERE       id::text = $1",
             )
             .bind(&id)
             .bind(next_attempt)
@@ -119,9 +123,10 @@ async fn daemon(pool: &PgPool) -> Result<(), sqlx::Error> {
             .await?;
         } else {
             sqlx::query(
-                "UPDATE rhino_jobs
-                 SET status = 'pending', attempts = $2, run_at = NOW() + INTERVAL '30 seconds', locked_at = NULL, locked_by = NULL
-                 WHERE id::text = $1",
+                "
+                UPDATE      rhino_jobs
+                SET         status = 'pending', attempts = $2, run_at = NOW() + INTERVAL '30 seconds', locked_at = NULL, locked_by = NULL
+                WHERE       id::text = $1",
             )
             .bind(&id)
             .bind(next_attempt)
@@ -160,9 +165,10 @@ async fn init_db() -> Result<PgPool, sqlx::Error> {
     .await?;
 
     sqlx::query(
-        "CREATE INDEX IF NOT EXISTS rhino_jobs_fetchable
-         ON rhino_jobs (status, priority DESC, run_at ASC)
-         WHERE status = 'pending'",
+        "
+        CREATE INDEX IF NOT EXISTS          rhino_jobs_fetchable
+        ON                                  rhino_jobs (status, priority DESC, run_at ASC)
+        WHERE                               status = 'pending'",
     )
     .execute(&pool)
     .await?;
