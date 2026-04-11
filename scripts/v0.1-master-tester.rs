@@ -1,18 +1,13 @@
 use std::fs;
-use std::io::Write;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
-use flate2::write::GzEncoder;
-use flate2::Compression;
-use rand::Rng;
+use rhino::worker::{daemon, init_db, DB_URL};
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row};
 use tokio::time::sleep;
 
-const DB_URL: &str = "postgresql://rhino:rhino@localhost:5445/rhino_db";
 const LOCK_TIMEOUT_SECS: i32 = 30;
 
 #[derive(Clone, Copy)]
@@ -59,8 +54,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let run_ts = Utc::now();
     let run_id = run_ts.format("%Y%m%dT%H%M%SZ").to_string();
 
-    let pool = PgPool::connect(DB_URL).await?;
-    ensure_schema(&pool).await?;
+    let pool = init_db().await?;
+    ensure_stress_schema(&pool).await?;
 
     // Gauge v0.1 as-is across multiple loads.
     let scenarios = vec![
@@ -131,7 +126,7 @@ async fn run_scenario(
     for _ in 0..scenario.jobs {
         sqlx::query(
             "INSERT INTO rhino_jobs (job_type, payload, status)
-             VALUES ('stress_noop', '{}', 'pending')",
+             VALUES ('stress_random', '{}', 'pending')",
         )
         .execute(pool)
         .await?;
@@ -263,7 +258,7 @@ async fn run_scenario(
 
 async fn worker_loop(pool: &PgPool, worker_id: usize) {
     loop {
-        let tick = worker_tick(pool, worker_id).await;
+        let tick = daemon(pool, &format!("worker-{worker_id}")).await;
         if tick.is_err() {
             break;
         }
@@ -282,110 +277,7 @@ async fn worker_loop(pool: &PgPool, worker_id: usize) {
     }
 }
 
-async fn worker_tick(pool: &PgPool, worker_id: usize) -> Result<(), sqlx::Error> {
-    let mut tx = pool.begin().await?;
-
-    let pending_job = sqlx::query(
-        "SELECT id::text AS id
-         FROM rhino_jobs
-         WHERE status = 'pending'
-           AND (locked_at IS NULL OR locked_at < NOW() - INTERVAL '30 seconds')
-           AND run_at <= NOW()
-         ORDER BY priority DESC, run_at ASC
-         LIMIT 1
-         FOR UPDATE SKIP LOCKED",
-    )
-    .fetch_optional(&mut *tx)
-    .await?;
-
-    let Some(job) = pending_job else {
-        tx.commit().await?;
-        return Ok(());
-    };
-
-    let id: String = job.get("id");
-
-    sqlx::query(
-        "UPDATE rhino_jobs
-            SET status = 'locked', locked_at = clock_timestamp(), locked_by = $2
-         WHERE id::text = $1",
-    )
-    .bind(&id)
-    .bind(format!("worker-{}", worker_id))
-    .execute(&mut *tx)
-    .await?;
-
-    let (op_kind, input_bytes, output_bytes, output_digest) = tokio::task::spawn_blocking(move || {
-        run_random_realistic_job()
-    })
-    .await
-    .map_err(|e| sqlx::Error::Protocol(format!("spawn_blocking join error: {e}").into()))?;
-
-    sqlx::query(
-        "INSERT INTO stress_job_results (job_id, op_kind, input_bytes, output_bytes, output_digest)
-         VALUES ($1, $2, $3, $4, $5)",
-    )
-    .bind(&id)
-    .bind(op_kind)
-    .bind(input_bytes)
-    .bind(output_bytes)
-    .bind(output_digest)
-    .execute(&mut *tx)
-    .await?;
-
-    sqlx::query("UPDATE stress_results SET counter = counter + 1")
-        .execute(&mut *tx)
-        .await?;
-
-    sqlx::query(
-        "UPDATE rhino_jobs
-            SET status = 'done', done_at = clock_timestamp()
-         WHERE id::text = $1",
-    )
-    .bind(&id)
-    .execute(&mut *tx)
-    .await?;
-
-    tx.commit().await?;
-    Ok(())
-}
-
-async fn ensure_schema(pool: &PgPool) -> Result<(), sqlx::Error> {
-    sqlx::query("CREATE EXTENSION IF NOT EXISTS pgcrypto")
-        .execute(pool)
-        .await?;
-
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS rhino_jobs (
-            id           UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-            job_type     TEXT        NOT NULL,
-            payload      JSONB       NOT NULL DEFAULT '{}'::jsonb,
-            status       TEXT        NOT NULL DEFAULT 'pending',
-            priority     INT         NOT NULL DEFAULT 0,
-            attempts     INT         NOT NULL DEFAULT 0,
-            max_attempts INT         NOT NULL DEFAULT 3,
-            run_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            locked_at    TIMESTAMPTZ,
-            done_at      TIMESTAMPTZ,
-            locked_by    TEXT,
-            inserted_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        )",
-    )
-    .execute(pool)
-    .await?;
-
-    sqlx::query("ALTER TABLE rhino_jobs ADD COLUMN IF NOT EXISTS done_at TIMESTAMPTZ")
-        .execute(pool)
-        .await?;
-
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS rhino_jobs_fetchable
-         ON rhino_jobs (status, priority DESC, run_at ASC)
-         WHERE status = 'pending'",
-    )
-    .execute(pool)
-    .await?;
-
+async fn ensure_stress_schema(pool: &PgPool) -> Result<(), sqlx::Error> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS stress_results (
             counter INT NOT NULL DEFAULT 0
@@ -418,35 +310,4 @@ async fn reset_data(pool: &PgPool) -> Result<(), sqlx::Error> {
         .execute(pool)
         .await?;
     Ok(())
-}
-
-fn run_random_realistic_job() -> (String, i32, i32, String) {
-    let mut rng = rand::thread_rng();
-    let input_size: usize = rng.gen_range(2048..8192);
-
-    let mut input = vec![0u8; input_size];
-    rng.fill(input.as_mut_slice());
-
-    if rng.gen_bool(0.5) {
-        let digest = Sha256::digest(&input);
-        let digest_hex = format!("{:x}", digest);
-        (
-            "hash".to_string(),
-            input_size as i32,
-            32,
-            digest_hex,
-        )
-    } else {
-        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-        encoder.write_all(&input).expect("gzip write failed");
-        let compressed = encoder.finish().expect("gzip finish failed");
-        let digest = Sha256::digest(&compressed);
-        let digest_hex = format!("{:x}", digest);
-        (
-            "compression".to_string(),
-            input_size as i32,
-            compressed.len() as i32,
-            digest_hex,
-        )
-    }
 }
