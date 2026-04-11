@@ -72,6 +72,10 @@ async fn daemon(pool: &PgPool) -> Result<(), sqlx::Error> {
         SELECT      id::text AS id, job_type, payload, attempts, max_attempts
         FROM        rhino_jobs
         WHERE       status = 'pending'
+        AND
+            (locked_at IS NULL
+            OR
+            locked_at < NOW() - INTERVAL '30 seconds')
         AND         run_at <= NOW()
         ORDER BY    priority DESC, run_at ASC
         LIMIT 1
