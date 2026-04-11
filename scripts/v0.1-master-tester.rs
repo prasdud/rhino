@@ -307,7 +307,7 @@ async fn worker_tick(pool: &PgPool, worker_id: usize) -> Result<(), sqlx::Error>
 
     sqlx::query(
         "UPDATE rhino_jobs
-         SET status = 'locked', locked_at = NOW(), locked_by = $2
+            SET status = 'locked', locked_at = clock_timestamp(), locked_by = $2
          WHERE id::text = $1",
     )
     .bind(&id)
@@ -339,7 +339,7 @@ async fn worker_tick(pool: &PgPool, worker_id: usize) -> Result<(), sqlx::Error>
 
     sqlx::query(
         "UPDATE rhino_jobs
-            SET status = 'done', done_at = NOW()
+            SET status = 'done', done_at = clock_timestamp()
          WHERE id::text = $1",
     )
     .bind(&id)
