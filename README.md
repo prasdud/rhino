@@ -3,6 +3,9 @@
 
 A durable, exactly-once job queue built in Rust.
 
+# commands
+docker exec -it rhino_db psql -U rhino -d rhino_db
+
 # to-do (v0.1)
 
 ## Done
