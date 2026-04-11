@@ -15,11 +15,14 @@ async fn main() {
     println!("Rhino Daemon is running...");
 
     loop {
-        if let Err(e) = daemon(&pool, "worker-1").await {
-            eprintln!("Daemon error: {}", e);
+        match daemon(&pool, "worker-1").await {
+            Ok(0) => sleep(Duration::from_millis(5)).await,
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("Daemon error: {}", e);
+                sleep(Duration::from_millis(10)).await;
+            }
         }
-
-        sleep(Duration::from_millis(5)).await;
     }
 }
 

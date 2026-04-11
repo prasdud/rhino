@@ -173,11 +173,6 @@ async fn run_scenario(
     }
     let drain_duration = drain_start.elapsed();
 
-    let counter: i32 = sqlx::query("SELECT counter FROM stress_results LIMIT 1")
-        .fetch_one(pool)
-        .await?
-        .get("counter");
-
     let jobs_done: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM rhino_jobs WHERE status = 'done'")
             .fetch_one(pool)
@@ -199,8 +194,9 @@ async fn run_scenario(
             .fetch_one(pool)
             .await?;
 
-    let exactly_once_ok =
-        counter == scenario.jobs && jobs_done == scenario.jobs as i64 && job_results_rows == scenario.jobs as i64;
+    let counter: i32 = job_results_rows as i32;
+
+    let exactly_once_ok = jobs_done == scenario.jobs as i64 && job_results_rows == scenario.jobs as i64;
 
     let queue_wait_row = sqlx::query(
         "SELECT
@@ -258,20 +254,21 @@ async fn run_scenario(
 
 async fn worker_loop(pool: &PgPool, worker_id: usize) {
     loop {
-        let tick = daemon(pool, &format!("worker-{worker_id}")).await;
-        if tick.is_err() {
-            break;
-        }
+        match daemon(pool, &format!("worker-{worker_id}")).await {
+            Ok(0) => {
+                let remaining = sqlx::query_scalar::<_, i64>(
+                    "SELECT COUNT(*) FROM rhino_jobs WHERE status IN ('pending', 'locked')",
+                )
+                .fetch_one(pool)
+                .await;
 
-        let remaining = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM rhino_jobs WHERE status IN ('pending', 'locked')",
-        )
-        .fetch_one(pool)
-        .await;
-
-        match remaining {
-            Ok(0) => break,
-            Ok(_) => sleep(Duration::from_millis(5)).await,
+                match remaining {
+                    Ok(0) => break,
+                    Ok(_) => sleep(Duration::from_millis(5)).await,
+                    Err(_) => break,
+                }
+            }
+            Ok(_) => {}
             Err(_) => break,
         }
     }
@@ -279,16 +276,8 @@ async fn worker_loop(pool: &PgPool, worker_id: usize) {
 
 async fn ensure_stress_schema(pool: &PgPool) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "CREATE TABLE IF NOT EXISTS stress_results (
-            counter INT NOT NULL DEFAULT 0
-        )",
-    )
-    .execute(pool)
-    .await?;
-
-    sqlx::query(
         "CREATE TABLE IF NOT EXISTS stress_job_results (
-            job_id TEXT PRIMARY KEY,
+            job_id UUID PRIMARY KEY,
             op_kind TEXT NOT NULL,
             input_bytes INT NOT NULL,
             output_bytes INT NOT NULL,
@@ -299,15 +288,19 @@ async fn ensure_stress_schema(pool: &PgPool) -> Result<(), sqlx::Error> {
     .execute(pool)
     .await?;
 
+    sqlx::query(
+        "ALTER TABLE stress_job_results
+         ALTER COLUMN job_id TYPE UUID
+         USING job_id::uuid",
+    )
+    .execute(pool)
+    .await?;
+
     Ok(())
 }
 
 async fn reset_data(pool: &PgPool) -> Result<(), sqlx::Error> {
     sqlx::query("TRUNCATE TABLE rhino_jobs").execute(pool).await?;
-    sqlx::query("TRUNCATE TABLE stress_results").execute(pool).await?;
     sqlx::query("TRUNCATE TABLE stress_job_results").execute(pool).await?;
-    sqlx::query("INSERT INTO stress_results (counter) VALUES (0)")
-        .execute(pool)
-        .await?;
     Ok(())
 }

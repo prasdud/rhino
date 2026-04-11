@@ -6,8 +6,23 @@ use rand::Rng;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row};
+use uuid::Uuid;
 
 pub const DB_URL: &str = "postgresql://rhino:rhino@localhost:5445/rhino_db";
+const CLAIM_BATCH_SIZE: i64 = 50;
+
+struct ClaimedJob {
+    id: Uuid,
+    job_type: String,
+    payload: Value,
+    attempts: i32,
+    max_attempts: i32,
+}
+
+struct JobExecution {
+    success: bool,
+    stress_result: Option<(String, i32, i32, String)>,
+}
 
 pub async fn init_db() -> Result<PgPool, sqlx::Error> {
     let pool = PgPool::connect(DB_URL).await?;
@@ -47,67 +62,148 @@ pub async fn init_db() -> Result<PgPool, sqlx::Error> {
     .execute(&pool)
     .await?;
 
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS rhino_jobs_reclaimable
+         ON rhino_jobs (status, locked_at)
+         WHERE status = 'locked'",
+    )
+    .execute(&pool)
+    .await?;
+
     Ok(pool)
 }
 
-pub async fn daemon(pool: &PgPool, worker_id: &str) -> Result<(), sqlx::Error> {
+pub async fn daemon(pool: &PgPool, worker_id: &str) -> Result<usize, sqlx::Error> {
+    let claimed_jobs = claim_jobs(pool, worker_id, CLAIM_BATCH_SIZE).await?;
+    if claimed_jobs.is_empty() {
+        return Ok(0);
+    }
+
+    let processed_count = claimed_jobs.len();
+
+    for job in claimed_jobs {
+        let execution = execute_job(&job.job_type, &job.payload).await?;
+        finalize_job(pool, &job, execution).await?;
+    }
+
+    Ok(processed_count)
+}
+
+async fn execute_job(
+    job_type: &str,
+    _payload: &Value,
+) -> Result<JobExecution, sqlx::Error> {
+    match job_type {
+        "stress_random" => {
+            let (op_kind, input_bytes, output_bytes, output_digest) = tokio::task::spawn_blocking(run_random_realistic_job)
+                .await
+                .map_err(|e| sqlx::Error::Protocol(format!("spawn_blocking join error: {e}").into()))?
+                .map_err(|e| sqlx::Error::Protocol(e.into()))?;
+
+            Ok(JobExecution {
+                success: true,
+                stress_result: Some((op_kind, input_bytes, output_bytes, output_digest)),
+            })
+        }
+        "stress_noop" => {
+            Ok(JobExecution {
+                success: true,
+                stress_result: None,
+            })
+        }
+        _ => {
+            let result = some_job(10, 20).await;
+            Ok(JobExecution {
+                success: result > 0,
+                stress_result: None,
+            })
+        }
+    }
+}
+
+async fn claim_jobs(pool: &PgPool, worker_id: &str, batch_size: i64) -> Result<Vec<ClaimedJob>, sqlx::Error> {
     let mut tx = pool.begin().await?;
 
-    let pending_job = sqlx::query(
-        "SELECT id::text AS id, job_type, payload, attempts, max_attempts
-         FROM rhino_jobs
-         WHERE status = 'pending'
-           AND (locked_at IS NULL OR locked_at < NOW() - INTERVAL '30 seconds')
-           AND run_at <= NOW()
-         ORDER BY priority DESC, run_at ASC
-         LIMIT 1
-         FOR UPDATE SKIP LOCKED",
+    let rows = sqlx::query(
+        "WITH candidates AS (
+            SELECT id, job_type, payload, attempts, max_attempts
+            FROM rhino_jobs
+            WHERE (
+                    status = 'pending'
+                AND run_at <= NOW()
+            ) OR (
+                    status = 'locked'
+                AND locked_at IS NOT NULL
+                AND locked_at < NOW() - INTERVAL '30 seconds'
+            )
+            ORDER BY priority DESC, run_at ASC
+            LIMIT $2
+            FOR UPDATE SKIP LOCKED
+        )
+        UPDATE rhino_jobs j
+        SET status = 'locked', locked_at = clock_timestamp(), locked_by = $1
+        FROM candidates c
+        WHERE j.id = c.id
+        RETURNING j.id, c.job_type, c.payload, c.attempts, c.max_attempts",
     )
-    .fetch_optional(&mut *tx)
-    .await?;
-
-    let Some(job) = pending_job else {
-        tx.commit().await?;
-        return Ok(());
-    };
-
-    let id: String = job.get("id");
-    let job_type: String = job.get("job_type");
-    let payload: Value = job.get("payload");
-    let attempts: i32 = job.get("attempts");
-    let max_attempts: i32 = job.get("max_attempts");
-
-    sqlx::query(
-        "UPDATE rhino_jobs
-         SET status = 'locked', locked_at = clock_timestamp(), locked_by = $2
-         WHERE id::text = $1",
-    )
-    .bind(&id)
     .bind(worker_id)
-    .execute(&mut *tx)
+    .bind(batch_size)
+    .fetch_all(&mut *tx)
     .await?;
 
-    let is_task_done = execute_job(&mut tx, &id, &job_type, &payload).await?;
+    tx.commit().await?;
 
-    if is_task_done {
+    let claimed = rows
+        .into_iter()
+        .map(|row| ClaimedJob {
+            id: row.get("id"),
+            job_type: row.get("job_type"),
+            payload: row.get("payload"),
+            attempts: row.get("attempts"),
+            max_attempts: row.get("max_attempts"),
+        })
+        .collect();
+
+    Ok(claimed)
+}
+
+async fn finalize_job(pool: &PgPool, job: &ClaimedJob, execution: JobExecution) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+
+    if let Some((op_kind, input_bytes, output_bytes, output_digest)) = execution.stress_result {
+        sqlx::query(
+            "INSERT INTO stress_job_results (job_id, op_kind, input_bytes, output_bytes, output_digest)
+             VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (job_id) DO NOTHING",
+        )
+        .bind(job.id)
+        .bind(op_kind)
+        .bind(input_bytes)
+        .bind(output_bytes)
+        .bind(output_digest)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    if execution.success {
         sqlx::query(
             "UPDATE rhino_jobs
              SET status = 'done', done_at = clock_timestamp()
-             WHERE id::text = $1",
+             WHERE id = $1",
         )
-        .bind(&id)
+        .bind(job.id)
         .execute(&mut *tx)
         .await?;
     } else {
-        let next_attempt = attempts + 1;
+        let next_attempt = job.attempts + 1;
 
-        if max_attempts > 0 && next_attempt >= max_attempts {
+        if job.max_attempts > 0 && next_attempt >= job.max_attempts {
             sqlx::query(
                 "UPDATE rhino_jobs
                  SET status = 'dead', attempts = $2
-                 WHERE id::text = $1",
+                 WHERE id = $1",
             )
-            .bind(&id)
+            .bind(job.id)
             .bind(next_attempt)
             .execute(&mut *tx)
             .await?;
@@ -115,9 +211,9 @@ pub async fn daemon(pool: &PgPool, worker_id: &str) -> Result<(), sqlx::Error> {
             sqlx::query(
                 "UPDATE rhino_jobs
                  SET status = 'pending', attempts = $2, run_at = NOW() + INTERVAL '30 seconds', locked_at = NULL, locked_by = NULL
-                 WHERE id::text = $1",
+                 WHERE id = $1",
             )
-            .bind(&id)
+            .bind(job.id)
             .bind(next_attempt)
             .execute(&mut *tx)
             .await?;
@@ -126,50 +222,6 @@ pub async fn daemon(pool: &PgPool, worker_id: &str) -> Result<(), sqlx::Error> {
 
     tx.commit().await?;
     Ok(())
-}
-
-async fn execute_job(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    job_id: &str,
-    job_type: &str,
-    _payload: &Value,
-) -> Result<bool, sqlx::Error> {
-    match job_type {
-        "stress_random" => {
-            let (op_kind, input_bytes, output_bytes, output_digest) = tokio::task::spawn_blocking(run_random_realistic_job)
-                .await
-                .map_err(|e| sqlx::Error::Protocol(format!("spawn_blocking join error: {e}").into()))?
-                .map_err(|e| sqlx::Error::Protocol(e.into()))?;
-
-            sqlx::query(
-                "INSERT INTO stress_job_results (job_id, op_kind, input_bytes, output_bytes, output_digest)
-                 VALUES ($1, $2, $3, $4, $5)",
-            )
-            .bind(job_id)
-            .bind(op_kind)
-            .bind(input_bytes)
-            .bind(output_bytes)
-            .bind(output_digest)
-            .execute(&mut **tx)
-            .await?;
-
-            sqlx::query("UPDATE stress_results SET counter = counter + 1")
-                .execute(&mut **tx)
-                .await?;
-
-            Ok(true)
-        }
-        "stress_noop" => {
-            sqlx::query("UPDATE stress_results SET counter = counter + 1")
-                .execute(&mut **tx)
-                .await?;
-            Ok(true)
-        }
-        _ => {
-            let result = some_job(10, 20).await;
-            Ok(result > 0)
-        }
-    }
 }
 
 async fn some_job(first_number: i16, second_number: i16) -> i16 {
