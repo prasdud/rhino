@@ -80,11 +80,22 @@ pub async fn daemon(pool: &PgPool, worker_id: &str) -> Result<usize, sqlx::Error
     }
 
     let processed_count = claimed_jobs.len();
+    let mut set = tokio::task::JoinSet::new();
 
     for job in claimed_jobs {
-        let execution = execute_job(&job.job_type, &job.payload).await?;
-        finalize_job(pool, &job, execution).await?;
+        set.spawn(async move {
+            let execution = execute_job(&job.job_type, &job.payload).await;
+            (job, execution)
+        });
     }
+
+    let mut results = Vec::with_capacity(processed_count);
+    while let Some(res) = set.join_next().await {
+        let (job, execution_res) = res.map_err(|e| sqlx::Error::Protocol(format!("Join error: {e}").into()))?;
+        results.push((job, execution_res?));
+    }
+
+    finalize_jobs_batch(pool, results).await?;
 
     Ok(processed_count)
 }
@@ -167,62 +178,100 @@ async fn claim_jobs(pool: &PgPool, worker_id: &str, batch_size: i64) -> Result<V
     Ok(claimed)
 }
 
-async fn finalize_job(pool: &PgPool, job: &ClaimedJob, execution: JobExecution) -> Result<(), sqlx::Error> {
+async fn finalize_jobs_batch(pool: &PgPool, results: Vec<(ClaimedJob, JobExecution)>) -> Result<(), sqlx::Error> {
     let mut tx = pool.begin().await?;
 
-    if let Some((op_kind, input_bytes, output_bytes, output_digest)) = execution.stress_result {
+    let mut success_ids = Vec::new();
+    let mut dead_ids = Vec::new();
+    let mut dead_attempts = Vec::new();
+    let mut retry_ids = Vec::new();
+    let mut retry_attempts = Vec::new();
+
+    let mut stress_job_ids = Vec::new();
+    let mut stress_op_kinds = Vec::new();
+    let mut stress_inputs = Vec::new();
+    let mut stress_outputs = Vec::new();
+    let mut stress_digests = Vec::new();
+
+    for (job, execution) in results {
+        if let Some((op_kind, input_bytes, output_bytes, output_digest)) = execution.stress_result {
+            stress_job_ids.push(job.id);
+            stress_op_kinds.push(op_kind);
+            stress_inputs.push(input_bytes);
+            stress_outputs.push(output_bytes);
+            stress_digests.push(output_digest);
+        }
+
+        if execution.success {
+            success_ids.push(job.id);
+        } else {
+            let next_attempt = job.attempts + 1;
+            if job.max_attempts > 0 && next_attempt >= job.max_attempts {
+                dead_ids.push(job.id);
+                dead_attempts.push(next_attempt);
+            } else {
+                retry_ids.push(job.id);
+                retry_attempts.push(next_attempt);
+            }
+        }
+    }
+
+    if !stress_job_ids.is_empty() {
         sqlx::query(
             "INSERT INTO stress_job_results (job_id, op_kind, input_bytes, output_bytes, output_digest)
-             VALUES ($1, $2, $3, $4, $5)
+             SELECT * FROM UNNEST($1, $2, $3, $4, $5)
              ON CONFLICT (job_id) DO NOTHING",
         )
-        .bind(job.id)
-        .bind(op_kind)
-        .bind(input_bytes)
-        .bind(output_bytes)
-        .bind(output_digest)
+        .bind(&stress_job_ids)
+        .bind(&stress_op_kinds)
+        .bind(&stress_inputs)
+        .bind(&stress_outputs)
+        .bind(&stress_digests)
         .execute(&mut *tx)
         .await?;
     }
 
-    if execution.success {
+    if !success_ids.is_empty() {
         sqlx::query(
             "UPDATE rhino_jobs
              SET status = 'done', done_at = clock_timestamp()
-             WHERE id = $1",
+             WHERE id = ANY($1)",
         )
-        .bind(job.id)
+        .bind(&success_ids)
         .execute(&mut *tx)
         .await?;
-    } else {
-        let next_attempt = job.attempts + 1;
+    }
 
-        if job.max_attempts > 0 && next_attempt >= job.max_attempts {
-            sqlx::query(
-                "UPDATE rhino_jobs
-                 SET status = 'dead', attempts = $2
-                 WHERE id = $1",
-            )
-            .bind(job.id)
-            .bind(next_attempt)
-            .execute(&mut *tx)
-            .await?;
-        } else {
-            sqlx::query(
-                "UPDATE rhino_jobs
-                 SET status = 'pending', attempts = $2, run_at = NOW() + INTERVAL '30 seconds', locked_at = NULL, locked_by = NULL
-                 WHERE id = $1",
-            )
-            .bind(job.id)
-            .bind(next_attempt)
-            .execute(&mut *tx)
-            .await?;
-        }
+    if !dead_ids.is_empty() {
+        sqlx::query(
+            "UPDATE rhino_jobs
+             SET status = 'dead', attempts = u.next_attempt
+             FROM UNNEST($1, $2) AS u(id, next_attempt)
+             WHERE rhino_jobs.id = u.id",
+        )
+        .bind(&dead_ids)
+        .bind(&dead_attempts)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    if !retry_ids.is_empty() {
+        sqlx::query(
+            "UPDATE rhino_jobs
+             SET status = 'pending', attempts = u.next_attempt, run_at = NOW() + INTERVAL '30 seconds', locked_at = NULL, locked_by = NULL
+             FROM UNNEST($1, $2) AS u(id, next_attempt)
+             WHERE rhino_jobs.id = u.id",
+        )
+        .bind(&retry_ids)
+        .bind(&retry_attempts)
+        .execute(&mut *tx)
+        .await?;
     }
 
     tx.commit().await?;
     Ok(())
 }
+
 
 async fn some_job(first_number: i16, second_number: i16) -> i16 {
     if first_number < 0 || second_number < 0 {
