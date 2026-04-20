@@ -9,7 +9,7 @@ use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 pub const DB_URL: &str = "postgresql://rhino:rhino@localhost:5445/rhino_db";
-const CLAIM_BATCH_SIZE: i64 = 50;
+const CLAIM_BATCH_SIZE: i64 = 250;
 
 struct ClaimedJob {
     id: Uuid,
