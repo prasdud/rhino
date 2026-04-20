@@ -9,19 +9,19 @@ use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 pub const DB_URL: &str = "postgresql://rhino:rhino@localhost:5445/rhino_db";
-const CLAIM_BATCH_SIZE: i64 = 250;
+const CLAIM_BATCH_SIZE: i64 = 1000;
 
-struct ClaimedJob {
-    id: Uuid,
-    job_type: String,
-    payload: Value,
-    attempts: i32,
-    max_attempts: i32,
+pub struct ClaimedJob {
+    pub id: Uuid,
+    pub job_type: String,
+    pub payload: Value,
+    pub attempts: i32,
+    pub max_attempts: i32,
 }
 
-struct JobExecution {
-    success: bool,
-    stress_result: Option<(String, i32, i32, String)>,
+pub struct JobExecution {
+    pub success: bool,
+    pub stress_result: Option<(String, i32, i32, String)>,
 }
 
 pub async fn init_db() -> Result<PgPool, sqlx::Error> {
@@ -80,6 +80,42 @@ pub async fn daemon(pool: &PgPool, worker_id: &str) -> Result<usize, sqlx::Error
     }
 
     let processed_count = claimed_jobs.len();
+    let results = execute_batch(claimed_jobs).await?;
+    finalize_jobs_batch(pool, results).await?;
+
+    Ok(processed_count)
+}
+
+pub async fn daemon_pipelined(
+    pool: &PgPool,
+    worker_id: &str,
+    prev_results: Option<Vec<(ClaimedJob, JobExecution)>>,
+) -> Result<(usize, Option<Vec<(ClaimedJob, JobExecution)>>), sqlx::Error> {
+    let (claimed_res, finalize_res) = tokio::join!(
+        claim_jobs(pool, worker_id, CLAIM_BATCH_SIZE),
+        async {
+            if let Some(res) = prev_results {
+                finalize_jobs_batch(pool, res).await?;
+            }
+            Ok::<(), sqlx::Error>(())
+        }
+    );
+
+    finalize_res?;
+    let claimed_jobs = claimed_res?;
+
+    if claimed_jobs.is_empty() {
+        return Ok((0, None));
+    }
+
+    let processed_count = claimed_jobs.len();
+    let results = execute_batch(claimed_jobs).await?;
+
+    Ok((processed_count, Some(results)))
+}
+
+async fn execute_batch(claimed_jobs: Vec<ClaimedJob>) -> Result<Vec<(ClaimedJob, JobExecution)>, sqlx::Error> {
+    let processed_count = claimed_jobs.len();
     let mut set = tokio::task::JoinSet::new();
 
     for job in claimed_jobs {
@@ -95,10 +131,9 @@ pub async fn daemon(pool: &PgPool, worker_id: &str) -> Result<usize, sqlx::Error
         results.push((job, execution_res?));
     }
 
-    finalize_jobs_batch(pool, results).await?;
-
-    Ok(processed_count)
+    Ok(results)
 }
+
 
 async fn execute_job(
     job_type: &str,
@@ -133,8 +168,6 @@ async fn execute_job(
 }
 
 async fn claim_jobs(pool: &PgPool, worker_id: &str, batch_size: i64) -> Result<Vec<ClaimedJob>, sqlx::Error> {
-    let mut tx = pool.begin().await?;
-
     let rows = sqlx::query(
         "WITH candidates AS (
             SELECT id, job_type, payload, attempts, max_attempts
@@ -159,10 +192,8 @@ async fn claim_jobs(pool: &PgPool, worker_id: &str, batch_size: i64) -> Result<V
     )
     .bind(worker_id)
     .bind(batch_size)
-    .fetch_all(&mut *tx)
+    .fetch_all(pool)
     .await?;
-
-    tx.commit().await?;
 
     let claimed = rows
         .into_iter()

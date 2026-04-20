@@ -59,9 +59,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Gauge v0.1 as-is across multiple loads.
     let scenarios = vec![
-        Scenario { jobs: 10_000, workers: 10 },
-        Scenario { jobs: 25_000, workers: 10 },
-        Scenario { jobs: 50_000, workers: 10 },
+        Scenario { jobs: 100_000, workers: 1 },
+        Scenario { jobs: 200_000, workers: 1 },
+        Scenario { jobs: 300_000, workers: 1 },
     ];
 
     println!("=== Rhino v0.1 Master Tester ===");
@@ -264,9 +264,12 @@ async fn run_scenario(
 }
 
 async fn worker_loop(pool: &PgPool, worker_id: usize) {
+    use rhino::worker::daemon_pipelined;
+    let mut prev_results = None;
+
     loop {
-        match daemon(pool, &format!("worker-{worker_id}")).await {
-            Ok(0) => {
+        match daemon_pipelined(pool, &format!("worker-{worker_id}"), prev_results).await {
+            Ok((0, None)) => {
                 let remaining = sqlx::query_scalar::<_, i64>(
                     "SELECT COUNT(*) FROM rhino_jobs WHERE status IN ('pending', 'locked')",
                 )
@@ -275,11 +278,16 @@ async fn worker_loop(pool: &PgPool, worker_id: usize) {
 
                 match remaining {
                     Ok(0) => break,
-                    Ok(_) => sleep(Duration::from_millis(5)).await,
+                    Ok(_) => {
+                        prev_results = None;
+                        sleep(Duration::from_millis(5)).await;
+                    }
                     Err(_) => break,
                 }
             }
-            Ok(_) => {}
+            Ok((_, current_results)) => {
+                prev_results = current_results;
+            }
             Err(_) => break,
         }
     }
