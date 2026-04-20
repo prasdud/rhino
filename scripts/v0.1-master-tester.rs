@@ -123,13 +123,20 @@ async fn run_scenario(
     reset_data(pool).await?;
 
     let insert_start = Instant::now();
-    for _ in 0..scenario.jobs {
-        sqlx::query(
-            "INSERT INTO rhino_jobs (job_type, payload, status)
-             VALUES ('stress_random', '{}', 'pending')",
-        )
-        .execute(pool)
-        .await?;
+    let chunk_size = 5000;
+    for i in (0..scenario.jobs).step_by(chunk_size) {
+        let current_chunk_size = (scenario.jobs - i).min(chunk_size as i32);
+        let mut query_builder: sqlx::QueryBuilder<sqlx::Postgres> =
+            sqlx::QueryBuilder::new("INSERT INTO rhino_jobs (job_type, payload, status) ");
+
+        query_builder.push_values(0..current_chunk_size, |mut b, _| {
+            b.push_bind("stress_random")
+                .push_bind(serde_json::json!({}))
+                .push_bind("pending");
+        });
+
+        let query = query_builder.build();
+        query.execute(pool).await?;
     }
     let insert_duration = insert_start.elapsed();
 
@@ -143,15 +150,19 @@ async fn run_scenario(
     }
 
     loop {
-        let pending_live: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM rhino_jobs WHERE status = 'pending'")
-            .fetch_one(pool)
-            .await?;
-        let locked_live: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM rhino_jobs WHERE status = 'locked'")
-            .fetch_one(pool)
-            .await?;
-        let done_live: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM rhino_jobs WHERE status = 'done'")
-            .fetch_one(pool)
-            .await?;
+        let stats_row = sqlx::query(
+            "SELECT
+                COUNT(*) FILTER (WHERE status = 'pending') AS pending,
+                COUNT(*) FILTER (WHERE status = 'locked') AS locked,
+                COUNT(*) FILTER (WHERE status = 'done') AS done
+             FROM rhino_jobs",
+        )
+        .fetch_one(pool)
+        .await?;
+
+        let pending_live: i64 = stats_row.get("pending");
+        let locked_live: i64 = stats_row.get("locked");
+        let done_live: i64 = stats_row.get("done");
 
         println!(
             "[live] done={} pending={} locked={} elapsed={:.1}s",
