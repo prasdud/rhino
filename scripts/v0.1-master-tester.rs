@@ -3,7 +3,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
-use rhino::worker::{daemon, init_db, DB_URL};
+use rhino::worker::{init_db, DB_URL};
 use serde::Serialize;
 use sqlx::{PgPool, Row};
 use tokio::time::sleep;
@@ -59,9 +59,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Gauge v0.1 as-is across multiple loads.
     let scenarios = vec![
-        Scenario { jobs: 100_000, workers: 1 },
-        Scenario { jobs: 200_000, workers: 1 },
-        Scenario { jobs: 300_000, workers: 1 },
+        Scenario { jobs: 100_000, workers: 10 },
+        Scenario { jobs: 200_000, workers: 10 },
+        Scenario { jobs: 300_000, workers: 10 },
     ];
 
     println!("=== Rhino v0.1 Master Tester ===");
