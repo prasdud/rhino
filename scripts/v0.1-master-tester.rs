@@ -59,9 +59,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Gauge v0.1 as-is across multiple loads.
     let scenarios = vec![
-        Scenario { jobs: 100_000, workers: 10 },
-        Scenario { jobs: 200_000, workers: 10 },
-        Scenario { jobs: 300_000, workers: 10 },
+        Scenario { jobs: 250_000, workers: 10 },
+        Scenario { jobs: 500_000, workers: 10 },
+        Scenario { jobs: 1_000_000, workers: 10 },
+        Scenario { jobs: 5_000_000, workers: 10 },
+
     ];
 
     println!("=== Rhino v0.1 Master Tester ===");
