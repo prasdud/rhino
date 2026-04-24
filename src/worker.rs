@@ -189,10 +189,8 @@ async fn claim_jobs(pool: &PgPool, worker_id: &str, batch_size: i64) -> Result<V
         "WITH candidates AS (
             SELECT id, job_type, payload, attempts, max_attempts
             FROM rhino_jobs
-            WHERE (status = 'pending'
-                AND run_at <= NOW())
-            OR (status = 'locked'
-                AND locked_at <= NOW() - INTERVAL '30 seconds')
+            WHERE status = 'pending'
+              AND run_at <= NOW()
             ORDER BY priority DESC, run_at ASC
             LIMIT $2
             FOR UPDATE SKIP LOCKED
