@@ -50,7 +50,7 @@ pub async fn init_db() -> Result<PgPool, sqlx::Error> {
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS rhino_jobs (
-            id           UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+            id           UUID        PRIMARY KEY DEFAULT uuidv7(),
             job_type     TEXT        NOT NULL,
             payload      JSONB       NOT NULL DEFAULT '{}'::jsonb,
             status       TEXT        NOT NULL DEFAULT 'pending',
