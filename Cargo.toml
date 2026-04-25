@@ -2,7 +2,10 @@
 name = "rhino"
 version = "0.1.0"
 edition = "2024"
-license = "GPL-3.0-or-later"
+license = "MIT"
+description = "Rhino is an open-source job queue library. It ships as a Rust crate that drops into any project. No broker, no sidecar, no managed service, no signup. The only dependency is a Postgres database — which most backend teams already have."
+repository = "https://github.com/prasdud/rhino"
+keywords = ["job", "queue", "durable", "rust"]
 
 [dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
