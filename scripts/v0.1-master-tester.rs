@@ -152,19 +152,18 @@ async fn run_scenario(
     }
 
     loop {
-        let stats_row = sqlx::query(
-            "SELECT
-                COUNT(*) FILTER (WHERE status = 'pending') AS pending,
-                COUNT(*) FILTER (WHERE status = 'locked') AS locked,
-                COUNT(*) FILTER (WHERE status = 'done') AS done
-             FROM rhino_jobs",
-        )
-        .fetch_one(pool)
-        .await?;
-
-        let pending_live: i64 = stats_row.get("pending");
-        let locked_live: i64 = stats_row.get("locked");
-        let done_live: i64 = stats_row.get("done");
+        let pending_live: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM rhino_jobs WHERE status = 'pending'")
+                .fetch_one(pool)
+                .await?;
+        let locked_live: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM rhino_jobs WHERE status = 'locked'")
+                .fetch_one(pool)
+                .await?;
+        let done_live: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM rhino_jobs WHERE status = 'done'")
+                .fetch_one(pool)
+                .await?;
 
         println!(
             "[live] done={} pending={} locked={} elapsed={:.1}s",
