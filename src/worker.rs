@@ -22,11 +22,13 @@ use flate2::Compression;
 use rand::Rng;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use sqlx::pool::PoolOptions;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 pub const DB_URL: &str = "postgresql://rhino:rhino@localhost:5445/rhino_db";
 const CLAIM_BATCH_SIZE: i64 = 1000;
+const POOL_MAX_CONNECTIONS: u32 = 32;
 
 pub struct ClaimedJob {
     pub id: Uuid,
@@ -42,7 +44,10 @@ pub struct JobExecution {
 }
 
 pub async fn init_db() -> Result<PgPool, sqlx::Error> {
-    let pool = PgPool::connect(DB_URL).await?;
+    let pool = PoolOptions::<sqlx::Postgres>::new()
+        .max_connections(POOL_MAX_CONNECTIONS)
+        .connect(DB_URL)
+        .await?;
 
     sqlx::query("CREATE EXTENSION IF NOT EXISTS pgcrypto")
         .execute(&pool)
