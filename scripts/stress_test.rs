@@ -29,7 +29,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     // Clear any leftover jobs
-    sqlx::query("DELETE FROM rhino_jobs").execute(&pool).await?;
+    sqlx::query("TRUNCATE TABLE rhino_jobs").execute(&pool).await?;
 
     // Insert 10k jobs
     println!("Inserting {} jobs...", NUM_JOBS);
