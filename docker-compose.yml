@@ -9,6 +9,28 @@ services:
       POSTGRES_USER: rhino
       POSTGRES_PASSWORD: rhino
       POSTGRES_DB: rhino_db
+    command:
+      - postgres
+      - -c
+      - shared_buffers=2GB
+      - -c
+      - work_mem=16MB
+      - -c
+      - maintenance_work_mem=512MB
+      - -c
+      - random_page_cost=1.1
+      - -c
+      - wal_buffers=64MB
+      - -c
+      - max_wal_size=2GB
+      - -c
+      - min_wal_size=512MB
+      - -c
+      - autovacuum_vacuum_scale_factor=0.02
+      - -c
+      - autovacuum_analyze_scale_factor=0.01
+      - -c
+      - effective_io_concurrency=200
     ports:
       - "5445:5432"
     volumes:
