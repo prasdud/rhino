@@ -296,7 +296,7 @@ async fn worker_loop(pool: &PgPool, worker_id: usize) {
 
 async fn ensure_stress_schema(pool: &PgPool) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "CREATE TABLE IF NOT EXISTS stress_job_results (
+        "CREATE UNLOGGED TABLE IF NOT EXISTS stress_job_results (
             job_id UUID PRIMARY KEY,
             op_kind TEXT NOT NULL,
             input_bytes INT NOT NULL,
