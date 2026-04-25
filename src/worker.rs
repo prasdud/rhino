@@ -54,6 +54,23 @@ pub async fn init_db() -> Result<PgPool, sqlx::Error> {
         .await?;
 
     sqlx::query(
+        "CREATE OR REPLACE FUNCTION uuidv7() RETURNS uuid AS $$
+        DECLARE
+            ms bigint;
+            hex text;
+        BEGIN
+            ms := (extract(epoch FROM clock_timestamp()) * 1000)::bigint;
+            hex := lpad(to_hex(ms), 12, '0') ||
+                   '7' || lpad(to_hex((random() * 4095)::int), 3, '0') ||
+                   to_hex(8 + (random() * 3)::int) || lpad(to_hex((random() * 1152921504606846975)::bigint), 15, '0');
+            RETURN hex::uuid;
+        END
+        $$ LANGUAGE plpgsql VOLATILE",
+    )
+    .execute(&pool)
+    .await?;
+
+    sqlx::query(
         "CREATE TABLE IF NOT EXISTS rhino_jobs (
             id           UUID        PRIMARY KEY DEFAULT uuidv7(),
             job_type     TEXT        NOT NULL,
